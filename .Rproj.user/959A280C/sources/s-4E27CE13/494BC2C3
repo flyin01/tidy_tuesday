@@ -1,0 +1,25 @@
+{
+    "id": "494BC2C3",
+    "path": "C:/repo/tidy_tuesday/src/tt_data_wrangling.R",
+    "project_path": "src/tt_data_wrangling.R",
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1592751672766.0,
+    "source_on_save": false,
+    "relative_order": 1,
+    "properties": {
+        "tempName": "Untitled1",
+        "cursorPosition": "129,1",
+        "scrollLine": "119"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1592774644,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1592774644214,
+    "read_only": false,
+    "read_only_alternatives": []
+}
