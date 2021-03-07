@@ -4,11 +4,129 @@ output: html_notebook
 ---
 
 This notebook is reproduced from the following source: 
+https://www.youtube.com/watch?v=opHDQzhO5Fw
+
+Performning clustering on employment data.
 
 ```{r}
+library(tidyverse)
+library(dplyr)
 
+# read in data from tt github
+employed <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-02-23/employed.csv")
+```
+Clean out some NA data and create new variable out of industry and minor_occupation, get the mean of nbr of people in those categories.
 
+```{r}
+employed_tidy <- employed %>%
+  filter(!is.na(employ_n)) %>%
+  group_by(occupation = paste(industry, minor_occupation),
+           race_gender) %>%
+  summarise(n = mean(employ_n)) %>%
+  ungroup()
+```
+Re-shape the data getting it ready for k-means
 
+```{r}
+library(tidyr)
+library(broom)
+library(ggplot2)
+library(purrr)
+library(plotly)
 ```
 
-Text
+
+```{r}
+employed_tidy %>%
+ summary()
+
+employment_demo <- employed_tidy %>%
+  filter(race_gender %in% c("Women", "Black or African American","Asian")) %>%
+  pivot_wider(names_from = race_gender, values_from = n, values_fill = 0) %>%
+  janitor::clean_names() %>%
+  left_join(employed_tidy %>%  # join in total to the pivot wider results
+      filter(race_gender =="TOTAL") %>%
+      select(-race_gender) %>%
+      rename(total = n)) %>%
+  filter(total > 1e4) %>% # hard filter to get rid of some observations that have small n
+  mutate(across(c(asian, black_or_african_american, women), ~ . / total), # ~ function and . is the variables we have "asian" etc divided by total to create proportions
+         total = log(total), # log transform due to the spread in values
+         across(is.numeric, ~as.numeric(scale(.)))) %>% # use default scale() the as.numeric(scale(.)) we force it instead of being a matrix to numeric
+         mutate(occupation = snakecase::to_snake_case(occupation)) # clean up occupation values into snakecase
+```
+For all the different occupation categories to compare how similar these are in terms of these four metrics that are now logged proportions.
+K-mean is sensitive to how the numbers are centered and scaled.
+
+```{r}
+employment_demo %>% arrange(-women)
+```
+
+Which occupations are the most like each other in terms of the demographic representation and in the total (nbr of working in the occupations all together)
+
+## Try k-means clustering
+
+```{r}
+# try with some default centers first
+employment_clust <- kmeans(select(employment_demo, -occupation), centers = 3)
+summary(employment_clust) # list of stuff
+```
+Use broom to tidy the result of kmeans
+```{r}
+tidy(employment_clust)
+```
+These are the three cluster centers in the four dimensional space for each of the dimensions and some additional information.
+
+We can also do additonal things.
+```{r}
+augment(employment_clust, employment_demo) %>% # compare the clustering data with the actual data and plot it
+  ggplot(aes(total, y = black_or_african_american, color = .cluster)) +
+  geom_point(alpha = 0.8)
+
+```
+We can tell already that there is no clean separation of the clusters. No occupations are cleanly separated from each other. Is clustering the right approach for this? Maybe not.
+
+We can test to at least find best number of clusters.
+
+```{r}
+# check how did the clustering do by its measures in terms of fitting the data
+glance(employment_clust)
+```
+
+
+## Choosing k
+
+```{r}
+kclusts <- 
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~ kmeans(select(employment_demo, -occupation), .x)),
+    tidied = map(kclust, tidy), # we don't need to do this but it is nice
+    glanced = map(kclust, glance),
+    agumented = map(kclust, augment, employment_demo)
+  )
+
+kclusts %>% # nested lists, we want to unnest this glanced to get the values showing how well we did do
+  unnest(glanced) %>%
+  ggplot(aes(x = k, y = tot.withinss)) + 
+  geom_line(alpha = 0.8) +
+  geom_point(size = 2)
+```
+If we had a data that has strong clusters we would see an elbow here. Tut we do not really see any good elbow point, maybe 5 is the best here but it is not clear.
+
+We redo our clustering
+
+```{r}
+# re run the clustering with k 5, make a interactive plot
+employment_clust <- kmeans(select(employment_demo, -occupation), centers = 5)
+summary(employment_clust) # list of stuff
+
+p <- augment(employment_clust, employment_demo) %>%
+  ggplot(aes(total, black_or_african_american, color = .cluster, name = occupation)) +
+  geom_point(alpha = 0.8)
+
+ggplotly(p)
+```
+This is an interactive html plot that gives us some more info about the observations.
+But we see no clear separations, so we can ask how appropriate kmeans is for this kind of data!?
+
+
