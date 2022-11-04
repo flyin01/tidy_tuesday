@@ -1,0 +1,299 @@
+---
+title: "tt_astronauts"
+output: html_notebook
+---
+
+This is another tidy tuesday dataset wrangling.
+Inspired by: https://www.youtube.com/watch?v=rzfTA3xi-W0&t=1248s
+
+## Download the dataset
+
+```{r}
+astronauts <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-07-14/astronauts.csv")
+
+# download file
+download.file("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-07-14/astronauts.csv", "data/astronauts.csv")
+```
+
+```{r}
+library(tidyverse)
+```
+
+## Check out the data set
+```{r}
+glimpse(astronauts)
+summary(astronauts)
+lapply(astronauts, function(x) {length(unique(x))})
+```
+
+```{r}
+astronauts %>% View()
+```
+Each observation (row) is one astronaut per mission. Duplicates per name and mission.
+
+
+## Purpose
+
+Ambition: Build a model to predictive model to predict how long a person was on that mission based on the information of the mission. So we want to build a regression model using hours_mission as response variable.  
+  
+Method: Bagging (bootstrap aggregating)
+
+
+## EDA
+
+```{r}
+astronauts %>%
+  group_by(name) %>%
+  tally() %>%
+  arrange(-n)
+```
+
+Check out the time people have spent in space, this has evolved over time
+```{r}
+astronauts %>%
+  mutate(year_of_mission = 10*(year_of_mission %/% 10),
+         # floor division * 10 = decades
+         year_of_mission = factor(year_of_mission)) %>%
+  ggplot(aes(x = year_of_mission, y = hours_mission,
+             fill = year_of_mission, colour = year_of_mission)) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.5) + 
+  # with colour we dont need legend anymore
+  scale_y_log10() + # scale this on log10 since the hours have developed alot
+  labs(x = NULL,
+       y = "Hours of mission")
+  
+```
+We want to predict the y axis. How long were astronauts in space.
+The median time in space is going up from the 60s and 70s to the 10s.
+We will model the y on the log scale that we have in the plot.
+We see that time affects it already in this.
+We will use bagging.
+
+
+## Build dataset for modelling
+
+Select some of the features for the modelling (not all this time)
+```{r}
+astronauts_df <- astronauts %>%
+  select(name, mission_title,
+         # name and mission not used in modelling but keep as identifiers
+         hours_mission,military_civilian,occupation, year_of_mission,in_orbit) %>%
+  mutate(in_orbit = case_when(str_detect(in_orbit, "^Salyut") ~ "Salyut",
+                              str_detect(in_orbit, "^STS") ~ "STS",
+                              TRUE ~ in_orbit),
+         occupation = str_to_lower(occupation)) %>%
+  filter(hours_mission > 0) %>%
+  mutate(hours_mission = log(hours_mission)) %>% 
+  #just take the log of the y to save some headache later
+  na.omit()
+```
+
+## Build model
+
+Using tidymodels
+```{r}
+library(tidymodels)
+```
+```{r}
+# split data set
+set.seed(123)
+
+astro_split <- initial_split(astronauts_df, strata = hours_mission) 
+# stratified sampling with hours_misison equal in the bins
+
+# create train and test data
+astro_train <- training(astro_split)
+astro_test  <- testing(astro_split)
+```
+
+We have split the data into astro_train and astro_test.
+The hours_mission is the one we are going to predict. This is on log scale.
+
+Some data preprocessing using recipe.
+```{r}
+astro_recipe <- recipe(hours_mission ~., data = astro_train) %>%
+  update_role(name, mission_title, new_role = "id") %>% 
+  # these two variable are not predictors or outcome
+  step_other(occupation, in_orbit, threshold = 0.005) %>%
+  step_dummy(all_nominal(), -has_role("id")) # We dont want id cols to be dummy variableswe make 
+```
+step_dummy makes dummy variables.
+astro_recipe object contains roles: id, outcome, predictor and number of variables (2, 1, 4).
+This object means that the recipe has been specified, but nothing has been estimated, trained etc yet.
+Now we can prep it to get the
+
+```{r}
+astro_recipe %>% prep() # receipe is estimated
+astro_recipe %>% prep() %>% juice() # ... juice means get the data back
+```
+prep() means estimated,
+juice() means get the data back.
+..ISS is the default level, that is why it is not seen as a dummy variable
+
+Now data has been pre-processed.
+
+
+Modelling - bagging models using the baguette package.
+It is like a modelling averaging method.
+The benfit of using this instead of just one model, it reduced overfitting and variance.
+We will take the dataset and create new bootstrap training datasets using resampling with replacement.
+We will draw with replacement from the 954 observations training dataset.
+We will then fit a model to each one of the bootstrap samples.
+Then we will combine by averaging the input because this is a regression model. 
+Classification combine by voting.
+```{r}
+library(baguette)
+```
+Let´s create a workflow with baguette
+```{r}
+astro_wf <- workflow() %>%
+  add_recipe(astro_recipe)
+
+astro_wf
+```
+Notice that it has recipe steps but it does not have a model yet.
+
+Now we make our model
+```{r}
+tree_spec <- bag_tree() %>%
+  set_engine("rpart", times = 25) %>%
+  set_mode("regression")
+
+tree_spec
+```
+rpart is a bagged decision tree.
+times = 25 says we will create 25 boot strap training set and train a model on each
+set_mode regression means we average the 25 models together to get the prediction
+
+Then we do another model
+```{r}
+mars_spec <- bag_mars() %>%
+  set_engine("earth", times = 25) %>%
+  set_mode("regression")
+
+mars_spec
+```
+this is a different kind of bagged model
+We have two different types of models that we can bag together
+The model specs work in slightly different ways.
+
+Now add model to workflow
+```{r}
+
+# training 25 models
+tree_rs <- astro_wf %>%
+  add_model(tree_spec) %>% # now model is included in wf
+  fit(astro_train) # we fit the model on the training dataset
+
+tree_rs
+```
+This ia bagged CART regression model with 25 members.
+It gives our aggregated variable importance score.
+Most important thing is the year_of_mission, next is about space craft the other category then the space shutle (STS).
+
+Do the same for the mars model
+```{r}
+
+# training 25 models
+mars_rs <- astro_wf %>%
+  add_model(mars_spec) %>% # now model is included in wf
+  fit(astro_train) # we fit the model on the training dataset
+
+mars_rs
+```
+It is training 25 models, when we predict it will average them together.
+All 25 models are in this mars_rs object.
+
+We get slightly different results compared to the tree results.
+In both methods the same three terms are on top but the order is different between them.
+Next we evalute the models.
+
+
+## Evaluate models
+
+Let´s look at our test data and compare these two modelling methods.
+```{r}
+predict(tree_rs,astro_test) # predicts by averaging 25 bagged decision tree models for the test data
+
+test_rs <- astro_test %>%
+  bind_cols(predict(tree_rs,astro_test)) %>%
+  rename(.pred_tree = .pred) %>%
+  bind_cols(predict(mars_rs,astro_test)) %>%
+  rename(.pred_mars = .pred)
+
+test_rs # here we have our test results
+```
+We have these two different predictions each of them created using bootstrap aggregation of different kinds of modelling methodologies. We can now find metrics for them.
+
+```{r}
+test_rs %>% metrics(hours_mission, .pred_tree) # the truth is hours_mission
+```
+This outputs rmse, rsq(r2) and mae (mean absolute error)
+Let´s look at the mars model.
+
+```{r}
+test_rs %>% metrics(hours_mission, .pred_mars)
+```
+It looks like the mars-model i a little bit better.
+At least with these defaults that we used.
+That is our model performance.
+
+We can also use this to understand what kind of predictions the bagged models are making.
+Lets make some new astrounatus by using the functions crossing()
+```{r}
+new_astronauts <- crossing(in_orbit = fct_inorder(c("ISS","STS","Mir","other")),
+                           military_civilian = "civilian",
+                           occupation = "other",
+                           year_of_mission = seq(1960,2020, by = 10),
+                           name = "id",
+                           mission_title = "id") %>%
+  filter(!(in_orbit == "ISS" & year_of_mission < 2000),
+         !(in_orbit == "Mir" & year_of_mission < 1990),
+         !(in_orbit == "STS" & year_of_mission < 1980),
+         !(in_orbit == "STS" & year_of_mission > 2010))
+
+new_astronauts
+```
+crossing() gives us every combination of those variable values.
+
+Now we do predictions for the new_astronauts
+```{r}
+predict(tree_rs, new_astronauts)
+```
+
+```{r}
+new_astronauts %>%
+  bind_cols(predict(tree_rs, new_astronauts)) %>%
+  ggplot(aes(year_of_mission, .pred, color = in_orbit)) +
+  geom_line(size = 1.5, alpha = .7) +
+  geom_point(size = 2) +
+  labs(x = NULL,
+       color = NULL,
+       y = "hours_mission predicted (on log scale)")
+```
+This is for the tree model.
+The bagged tree model is able to average over time.
+
+Compare with the mars model.
+```{r}
+new_astronauts %>%
+  bind_cols(predict(mars_rs, new_astronauts)) %>%
+  ggplot(aes(year_of_mission, .pred, color = in_orbit)) +
+  geom_line(size = 1.5, alpha = .7) +
+  geom_point(size = 2) +
+  labs(x = NULL,
+       color = NULL,
+       y = "hours_mission predicted (on log scale)")
+```
+The mars model puts the space stations close to each other.
+It avearges over these different categories to be able to find this results.
+
+This shows what kind of nice results we can get using boot strap aggregatin (bagging!)
+Non linear effects from time and different types of categorical predictors.
+
+tree model
+mars model
+
+Bagging can reduce overfitting, decrease variance and increase stability.
+
+End!
